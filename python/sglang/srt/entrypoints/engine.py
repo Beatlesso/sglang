@@ -557,9 +557,11 @@ def _launch_subprocesses(
         server_args.model_path, server_args.tokenizer_path
     )
 
-    scheduler_procs = []
-    if server_args.dp_size == 1:
+    scheduler_procs = [] # 用于存储所有启动的子进程对象
+    if server_args.dp_size == 1: # 启动张量并行(tp) 和 流水线并行(pp)
+        
         # Launch tensor parallel scheduler processes
+        # 创建内存优化器
         memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=server_args.enable_memory_saver
         )
@@ -568,12 +570,14 @@ def _launch_subprocesses(
 
         nnodes_per_tp_group = max(server_args.nnodes // server_args.pp_size, 1)
         tp_size_per_node = server_args.tp_size // nnodes_per_tp_group
-        tp_rank_range = range(
+        # 当前节点在所属 TP 组中的 TP rank 范围
+        tp_rank_range = range(  
             tp_size_per_node * (server_args.node_rank % nnodes_per_tp_group),
             tp_size_per_node * (server_args.node_rank % nnodes_per_tp_group + 1),
         )
 
         pp_size_per_node = max(server_args.pp_size // server_args.nnodes, 1)
+        # 当前节点在所属 PP 组中的 PP rank 范围
         pp_rank_range = range(
             pp_size_per_node * (server_args.node_rank // nnodes_per_tp_group),
             pp_size_per_node * (server_args.node_rank // nnodes_per_tp_group + 1),
@@ -581,12 +585,14 @@ def _launch_subprocesses(
 
         for pp_rank in pp_rank_range:
             for tp_rank in tp_rank_range:
-                reader, writer = mp.Pipe(duplex=False)
+                reader, writer = mp.Pipe(duplex=False)  # 创建单向管道
+                # 根据 pp_rank 和 tp_rank 动态分配 GPU
                 gpu_id = (
                     server_args.base_gpu_id
                     + ((pp_rank % pp_size_per_node) * tp_size_per_node)
                     + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
                 )
+                # 启动子进程，执行 run_scheduler_process 函数
                 proc = mp.Process(
                     target=run_scheduler_process,
                     args=(
@@ -599,15 +605,19 @@ def _launch_subprocesses(
                         writer,
                     ),
                 )
+                # 优化子进程内存
                 with memory_saver_adapter.configure_subprocess():
                     proc.start()
+                # 存储子进程对象和管道读取端
                 scheduler_procs.append(proc)
                 scheduler_pipe_readers.append(reader)
     else:
         # Launch the data parallel controller
+        # 将训练数据划分为多个批次，每个 GPU 存储完整模型副本，独立处理一个批次，最后同步梯度
         reader, writer = mp.Pipe(duplex=False)
         scheduler_pipe_readers = [reader]
         proc = mp.Process(
+            # 注意 target 和 tp 的 run_scheduler_process 不同
             target=run_data_parallel_controller_process,
             args=(server_args, port_args, writer),
         )
@@ -618,6 +628,7 @@ def _launch_subprocesses(
         # In multi-node cases, non-zero rank nodes do not need to run tokenizer or detokenizer,
         # so they can just wait here.
 
+        # 等待子进程就绪
         for reader in scheduler_pipe_readers:
             data = reader.recv()
             assert data["status"] == "ready"
@@ -628,6 +639,7 @@ def _launch_subprocesses(
 
         launch_dummy_health_check_server(server_args.host, server_args.port)
 
+        # 等待子进程结束
         for proc in scheduler_procs:
             proc.join()
             logger.error(
@@ -658,7 +670,7 @@ def _launch_subprocesses(
         load_completion_template_for_openai_api(server_args.completion_template)
 
     # Wait for the model to finish loading
-    scheduler_infos = []
+    scheduler_infos = [] # 存储子进程返回的信息
     for i in range(len(scheduler_pipe_readers)):
         try:
             data = scheduler_pipe_readers[i].recv()

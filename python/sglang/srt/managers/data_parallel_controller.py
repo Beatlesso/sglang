@@ -285,9 +285,10 @@ def run_data_parallel_controller_process(
     port_args: PortArgs,
     pipe_writer,
 ):
+    # 修改进程名称
     setproctitle.setproctitle("sglang::data_parallel_controller")
-    configure_logger(server_args)
-    parent_process = psutil.Process().parent()
+    configure_logger(server_args) # 配置日志格式和级别
+    parent_process = psutil.Process().parent() # 获取当前进程的父进程对象
 
     try:
         controller = DataParallelController(server_args, port_args)
@@ -298,8 +299,10 @@ def run_data_parallel_controller_process(
                 "max_req_input_len": controller.max_req_input_len,
             }
         )
+        # 仅主节点运行事件监听
         if server_args.node_rank == 0:
             controller.event_loop()
+        # 等待子进程结束
         for proc in controller.scheduler_procs:
             proc.join()
             logger.error(
